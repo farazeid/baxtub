@@ -1,0 +1,41 @@
+[project]
+name = "baxtub"
+version = "0.0.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "argparse>=1.4.0",
+    "craftax>=1.5.0",
+    "distrax>=0.1.5",
+    "flax<=0.10",
+    "jax[cuda12]<=0.5",
+    "mlflow>=3.1.4",
+    "optax>=0.2.4",
+    "orbax>=0.1.9",
+    "wandb>=0.21.1",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "N",   # pep8-naming
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "S",   # flake8-bandit
+    "UP",  # pyupgrade
+    "ANN", # flake8-annotations
+    "SIM", # flake8-simplify
+    "C90", # mccabe cyclomatic complexity
+]
+ignore = [
+    "S101",  # assert
+    "S311",  # requiring cryptographicly secure rng
+    "UP046", # generic issue
+    "E501",  # line length - already in ruff formatter
+]
