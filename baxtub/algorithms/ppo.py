@@ -320,30 +320,30 @@ def make_run(config: dict[str, Any]) -> Callable:
 
             jax.lax.cond(
                 jnp.logical_or(
-                    batch_idx % config.get("metrics_every", 1) == 0,
+                    batch_idx % config["logging"].get("metrics_every", 1) == 0,
                     batch_idx == n_batches - 1,
                 ),
                 do_metrics,
                 lambda: None,
             )
 
-            # jax.lax.cond(
-            #     jnp.logical_or(
-            #         batch_idx % config.get("checkpoint_every", 10) == 0,
-            #         batch_idx == n_batches - 1,
-            #     ),
-            #     do_checkpoint,
-            #     lambda: None,
-            # )
+            jax.lax.cond(
+                jnp.logical_or(
+                    batch_idx % config["logging"].get("checkpoint_every", 10) == 0,
+                    batch_idx == n_batches - 1,
+                ),
+                do_checkpoint,
+                lambda: None,
+            )
 
-            # jax.lax.cond(
-            #     jnp.logical_or(
-            #         batch_idx % config.get("snapshot_every", jnp.inf) == 0,
-            #         batch_idx == n_batches - 1,
-            #     ),
-            #     do_snapshot,
-            #     lambda: None,
-            # )
+            jax.lax.cond(
+                jnp.logical_or(
+                    batch_idx % config["logging"].get("snapshot_every", jnp.inf) == 0,
+                    batch_idx == n_batches - 1,
+                ),
+                do_snapshot,
+                lambda: None,
+            )
 
             # endregion
 
