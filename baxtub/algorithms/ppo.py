@@ -1,5 +1,6 @@
 import argparse
 import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -264,42 +265,58 @@ def make_run(config: dict[str, Any]) -> Callable:
                     batch_idx,
                 )
 
-            # def do_checkpoint():
-            #     def checkpoint_callback(batch_idx, model_state):
-            #         run_dir = Path(mlflow.get_artifact_uri().replace("file://", ""))
-            #         ckpt_dir = run_dir / "checkpoints" / f"{batch_idx:06d}"
-            #         checkpointer = orbax.checkpoint.StandardCheckpointer()
-            #         checkpointer.save(ckpt_dir, model_state)
+            def do_checkpoint():
+                def checkpoint_callback(batch_idx, model_state):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        checkpoint_path = Path(temp_dir) / f"checkpoint_{batch_idx}"
+                        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                        checkpointer.save(checkpoint_path, model_state)
 
-            #     _, model_state = nnx.split(model)
-            #     jax.debug.callback(
-            #         checkpoint_callback,
-            #         batch_idx,
-            #         model_state,
-            #     )
+                        artifact = wandb.Artifact(
+                            name=f"model_checkpoint_{batch_idx}",
+                            type="model",
+                            description=f"Model checkpoint at batch {batch_idx}",
+                        )
+                        artifact.add_dir(str(checkpoint_path))
+                        wandb.log_artifact(artifact)
 
-            # def do_snapshot():
-            #     def snapshot_callback(batch_idx, snapshot):
-            #         run_dir = Path(mlflow.get_artifact_uri().replace("file://", ""))
-            #         snapshot_dir = run_dir / "run_state_snapshots" / f"{batch_idx:06d}"
-            #         checkpointer = orbax.checkpoint.StandardCheckpointer()
-            #         checkpointer.save(snapshot_dir, snapshot)
+                _, model_state = nnx.split(model)
+                jax.debug.callback(
+                    checkpoint_callback,
+                    batch_idx,
+                    model_state,
+                )
 
-            #     _, model_state = nnx.split(model)
-            #     optim_state = nnx.state(optim)
-            #     snapshot = {
-            #         "obs": obs,
-            #         "model_state": model_state,
-            #         "optim_state": optim_state,
-            #         "env_state": env_state,
-            #         "batch_idx": batch_idx,
-            #         "batch_key": batch_key,
-            #     }
-            #     jax.debug.callback(
-            #         snapshot_callback,
-            #         batch_idx,
-            #         snapshot,
-            #     )
+            def do_snapshot():
+                def snapshot_callback(batch_idx, snapshot):
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        snapshot_path = Path(temp_dir) / f"snapshot_{batch_idx}"
+                        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                        checkpointer.save(snapshot_path, snapshot)
+
+                        artifact = wandb.Artifact(
+                            name=f"full_snapshot_{batch_idx}",
+                            type="snapshot",
+                            description=f"Complete training snapshot at batch {batch_idx}",
+                        )
+                        artifact.add_dir(str(snapshot_path))
+                        wandb.log_artifact(artifact)
+
+                _, model_state = nnx.split(model)
+                optim_state = nnx.state(optim)
+                snapshot = {
+                    "obs": obs,
+                    "model_state": model_state,
+                    "optim_state": optim_state,
+                    "env_state": env_state,
+                    "batch_idx": batch_idx,
+                    "batch_key": batch_key,
+                }
+                jax.debug.callback(
+                    snapshot_callback,
+                    batch_idx,
+                    snapshot,
+                )
 
             jax.lax.cond(
                 jnp.logical_or(
