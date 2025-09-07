@@ -1,8 +1,8 @@
 import time
 
 import jax.numpy as jnp
-import mlflow
 import numpy as np
+
 import wandb
 
 batch_logs = {}
@@ -75,15 +75,9 @@ def batch_log(update_step, log, config):
                 print("Started logging")
             elif len(log_times) > 1:
                 dt = log_times[-1] - log_times[-2]
-                steps_between_updates = (
-                    config["NUM_STEPS"] * config["NUM_ENVS"] * config["NUM_REPEATS"]
-                )
+                steps_between_updates = config["NUM_STEPS"] * config["NUM_ENVS"] * config["NUM_REPEATS"]
                 sps = steps_between_updates / dt
                 agg_logs["sps"] = sps
 
         if wandb.run:
             wandb.log(agg_logs)
-        if mlflow.active_run():
-            mlflow.log_metrics(
-                agg_logs, step=update_step * config["NUM_STEPS"] * config["NUM_ENVS"]
-            )

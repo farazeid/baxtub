@@ -10,7 +10,6 @@ dependencies = [
     "distrax>=0.1.5",
     "flax<=0.10",
     "jax[cuda12]<=0.5",
-    "mlflow>=3.1.4",
     "optax>=0.2.4",
     "orbax>=0.1.9",
     "wandb>=0.21.1",
