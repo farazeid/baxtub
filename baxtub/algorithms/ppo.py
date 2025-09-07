@@ -1,7 +1,8 @@
 import argparse
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +41,7 @@ def make_run(config: dict[str, Any]) -> Callable:
     n_batches = config["training"]["n_steps"] // config["n_envs"] // config["training"]["n_batch_steps"]
     batch_size = config["n_envs"] * config["training"]["n_batch_steps"]
 
-    def lr_schedule(batch_idx):
+    def lr_schedule(batch_idx: int) -> float:
         return config["training"]["lr"] * (
             1 - (batch_idx // (config["training"]["n_minibatches"] * config["training"]["n_epochs"])) / n_batches
         )
@@ -239,8 +240,11 @@ def make_run(config: dict[str, Any]) -> Callable:
 
             # region logging
 
-            def do_metrics():
-                def metrics_callback(metric_info, batch_idx):
+            def do_metrics() -> None:
+                def metrics_callback(
+                    metric_info: dict[str, Any],
+                    batch_idx: int,
+                ) -> None:
                     # Add NUM_REPEATS for batch logging compatibility
                     config["NUM_REPEATS"] = config["n_runs"]
                     config["DEBUG"] = True  # Add DEBUG flag for batch logging
