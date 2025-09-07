@@ -1,6 +1,7 @@
 import argparse
 import os
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -38,7 +39,9 @@ class Transition(NamedTuple):
     log_prob: jnp.ndarray
 
 
-def make_run(config: dict[str, Any]) -> Callable:
+def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
+    logging_threads = []
+
     n_batches = config["training"]["n_steps"] // config["n_envs"] // config["training"]["n_batch_steps"]
     batch_size = config["n_envs"] * config["training"]["n_batch_steps"]
 
@@ -266,19 +269,31 @@ def make_run(config: dict[str, Any]) -> Callable:
                 )
 
             def do_checkpoint():
-                def checkpoint_callback(batch_idx, model_state):
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        checkpoint_path = Path(temp_dir) / f"checkpoint_{batch_idx}"
-                        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                        checkpointer.save(checkpoint_path, model_state)
+                def save_checkpoint(batch_idx, model_state) -> None:
+                    try:
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            checkpoint_path = Path(temp_dir) / f"checkpoint_{batch_idx}"
+                            checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                            checkpointer.save(checkpoint_path, model_state)
 
-                        artifact = wandb.Artifact(
-                            name=f"model_checkpoint_{batch_idx}",
-                            type="model",
-                            description=f"Model checkpoint at batch {batch_idx}",
-                        )
-                        artifact.add_dir(str(checkpoint_path))
-                        wandb.log_artifact(artifact)
+                            artifact = wandb.Artifact(
+                                name=f"model_checkpoint_{batch_idx}",
+                                type="model",
+                                description=f"Model checkpoint at batch {batch_idx}",
+                            )
+                            artifact.add_dir(str(checkpoint_path))
+                            wandb.log_artifact(artifact)
+                    except Exception as e:
+                        print(f"Error saving checkpoint at batch {batch_idx}: {e}")
+
+                def checkpoint_callback(batch_idx, model_state) -> None:
+                    checkpoint_thread = threading.Thread(
+                        target=save_checkpoint,
+                        args=(batch_idx, model_state),
+                        daemon=False,
+                    )
+                    logging_threads.append(checkpoint_thread)
+                    checkpoint_thread.start()
 
                 _, model_state = nnx.split(model)
                 jax.debug.callback(
@@ -288,19 +303,31 @@ def make_run(config: dict[str, Any]) -> Callable:
                 )
 
             def do_snapshot():
-                def snapshot_callback(batch_idx, snapshot):
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        snapshot_path = Path(temp_dir) / f"snapshot_{batch_idx}"
-                        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                        checkpointer.save(snapshot_path, snapshot)
+                def save_snapshot(batch_idx, snapshot) -> None:
+                    try:
+                        with tempfile.TemporaryDirectory() as temp_dir:
+                            snapshot_path = Path(temp_dir) / f"snapshot_{batch_idx}"
+                            checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                            checkpointer.save(snapshot_path, snapshot)
 
-                        artifact = wandb.Artifact(
-                            name=f"full_snapshot_{batch_idx}",
-                            type="snapshot",
-                            description=f"Complete training snapshot at batch {batch_idx}",
-                        )
-                        artifact.add_dir(str(snapshot_path))
-                        wandb.log_artifact(artifact)
+                            artifact = wandb.Artifact(
+                                name=f"full_snapshot_{batch_idx}",
+                                type="snapshot",
+                                description=f"Complete training snapshot at batch {batch_idx}",
+                            )
+                            artifact.add_dir(str(snapshot_path))
+                            wandb.log_artifact(artifact)
+                    except Exception as e:
+                        print(f"Error saving snapshot at batch {batch_idx}: {e}")
+
+                def snapshot_callback(batch_idx, snapshot) -> None:
+                    snapshot_thread = threading.Thread(
+                        target=save_snapshot,
+                        args=(batch_idx, snapshot),
+                        daemon=False,
+                    )
+                    logging_threads.append(snapshot_thread)
+                    snapshot_thread.start()
 
                 _, model_state = nnx.split(model)
                 optim_state = nnx.state(optim)
@@ -407,7 +434,7 @@ def make_run(config: dict[str, Any]) -> Callable:
             num_envs=config["n_envs"],
         )
 
-    return run
+    return run, logging_threads
 
 
 if __name__ == "__main__":
@@ -450,8 +477,14 @@ if __name__ == "__main__":
     key = jax.random.PRNGKey(config["seed"])
     runs_keys = jax.random.split(key, config["n_runs"])
 
-    run = make_run(config)
+    run, logging_threads = make_run(config)
     run = nnx.jit(run)
     run = nnx.vmap(run)
 
     run_state, _ = run(runs_keys)
+
+    print(f"Training completed. Waiting for {len(logging_threads)} logging threads to complete...")
+    for thread in logging_threads:
+        if thread.is_alive():
+            thread.join()
+    print("Logging threads complete.")
