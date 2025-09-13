@@ -1,6 +1,8 @@
 # Baxtub
 
-Single-file composable end-to-end JAX Reinforcement Learning via Flax NNX
+Single-file composable end-to-end JAX Reinforcement Learning via Flax NNX.
+
+Copy-paste desired components into algorithm script or import — refer to `baxtub/algorithms/ppo.py`, cut any un-wanted components.
 
 <br>
 <br>
