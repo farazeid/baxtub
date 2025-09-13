@@ -33,6 +33,10 @@ def create_log_dict(info, config):
         elif config.get("USE_RND"):
             to_log["rnd_loss"] = info["rnd_loss"]
 
+    to_log["loss"] = info["loss"]
+    to_log["policy_loss"] = info["policy_loss"]
+    to_log["value_loss"] = info["value_loss"]
+    to_log["entropy_loss"] = info["entropy_loss"]
     return to_log
 
 

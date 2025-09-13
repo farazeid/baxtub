@@ -161,10 +161,10 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                     model, optim = model_optim
                     batch, advantages, returns = minibatch
 
-                    loss, grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, batch, advantages, returns)
+                    losses, grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, batch, advantages, returns)
                     optim.update(grads)
 
-                    return model_optim, loss
+                    return model_optim, losses
 
                 model, optim, batch, advantages, returns, key = update_state
 
@@ -218,6 +218,11 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                 advantages,
             )
 
+            metric_info = jax.tree.map(
+                lambda x: (x * batch.info["returned_episode"]).sum() / batch.info["returned_episode"].sum(),
+                batch.info,
+            )
+
             update_state = (
                 model,
                 optim,
@@ -226,10 +231,19 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                 returns,
                 batch_key,
             )
-            update_state, losses = nnx.scan(
+            update_state, (loss, (policy_loss, value_loss, entropy_loss)) = nnx.scan(
                 epoch_update,
                 length=config["training"]["n_epochs"],
             )(update_state, None)
+
+            metric_info.update(
+                {
+                    "loss": loss.mean(),
+                    "policy_loss": policy_loss.mean(),
+                    "value_loss": value_loss.mean(),
+                    "entropy_loss": entropy_loss.mean(),
+                }
+            )
 
             model, optim, _, _, _, _ = update_state
 
@@ -258,10 +272,6 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                     to_log = create_log_dict(metric_info, config)
                     batch_log(batch_idx, to_log, config)
 
-                metric_info = jax.tree.map(
-                    lambda x: (x * batch.info["returned_episode"]).sum() / batch.info["returned_episode"].sum(),
-                    batch.info,
-                )
                 jax.debug.callback(
                     metrics_callback,
                     metric_info,
