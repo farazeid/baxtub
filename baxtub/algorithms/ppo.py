@@ -53,7 +53,7 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
     def run(rng: jax.random.PRNGKey):
         def batch_step(run_state, _):
             def step(run_state, _):
-                obs, model, optim, env_state, batch_idx, key = run_state
+                obs, model, optim, env_state, batch_idx, key, extra = run_state
 
                 key, action_key, step_key = jax.random.split(key, 3)
 
@@ -87,6 +87,8 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                     env_state,
                     batch_idx,
                     key,
+                    #
+                    extra,
                 )
 
                 return run_state, transition
@@ -197,7 +199,7 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                 step,
                 length=config["training"]["n_batch_steps"],
             )(run_state, None)
-            obs, model, optim, env_state, batch_idx, batch_key = run_state
+            obs, model, optim, env_state, batch_idx, batch_key, extra = run_state
 
             _, (returns, advantages) = nnx.scan(
                 rollout_step,
@@ -254,6 +256,8 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                 env_state,
                 batch_idx + 1,
                 batch_key,
+                #
+                extra,
             )
 
             # region logging
@@ -419,6 +423,8 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
             batch_idx := 0,
             batch_key,
         )
+
+        extra = {}
         run_state, _ = nnx.scan(
             batch_step,
             length=n_batches,
