@@ -1,0 +1,62 @@
+entity: baxtub
+project: development
+experiment: ppo-crafter-icm
+
+seed: 42
+n_runs: 1
+n_envs: 512
+deterministic: true
+
+env:
+  id: "Craftax-Classic-Symbolic-v1" # or "Craftax-Classic-Pixels-v1"
+  optimistic_resets:
+    reset_ratio: 16
+
+agent:
+  layer_width: 512
+
+training:
+  gamma: 0.99
+  gae_lambda: 0.8
+  clip_coef: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  max_grad_norm: 1.0
+  norm_advantage: true
+  clip_vloss: false
+
+  n_steps: 1e6
+  n_batch_steps: 64
+  n_epochs: &n_epochs 4
+  n_minibatches: &n_minibatches 8
+
+  lr: 2e-4
+  anneal_lr: true
+
+intrinsic:
+  ICM:
+    n_epochs: *n_epochs
+    n_minibatches: *n_minibatches
+
+    reward_coef: 1.0
+    forward_loss_coef: 1.0
+    inverse_loss_coef: 1.0
+
+    latent_dim: 32
+    encoder:
+      layer_width: &icm_layer_width 256
+      n_layers: &icm_n_layers 3
+    forward:
+      layer_width: *icm_layer_width
+      n_layers: *icm_n_layers
+    inverse:
+      layer_width: *icm_layer_width
+      n_layers: *icm_n_layers
+
+    max_grad_norm: 1.0
+    lr: !!float 3e-4
+
+logging: # every n batches
+  metrics_every: 1
+  # checkpoint_every:  # comment-out to only snapshot at end of training
+  # snapshot_every:

@@ -37,6 +37,14 @@ def create_log_dict(info, config):
     to_log["policy_loss"] = info["policy_loss"]
     to_log["value_loss"] = info["value_loss"]
     to_log["entropy_loss"] = info["entropy_loss"]
+    if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
+        to_log["reward_extrinsic"] = info["reward_extrinsic"]
+        to_log["reward_intrinsic"] = info["reward_intrinsic"]
+        to_log["icm_reward"] = info["icm_reward"]
+
+        to_log["icm_inverse_loss"] = info["icm_inverse_loss"]
+        to_log["icm_forward_loss"] = info["icm_forward_loss"]
+
     return to_log
 
 

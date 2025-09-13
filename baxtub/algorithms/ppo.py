@@ -37,6 +37,8 @@ class Transition(NamedTuple):
     #
     value: jnp.ndarray
     log_prob: jnp.ndarray
+    #
+    extra: dict[str, Any] = {}
 
 
 def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
@@ -68,6 +70,24 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                     env_params,
                 )
 
+                transition_extra = {}
+                if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
+                    icm_encoder = extra["icm_encoder"]
+                    icm_forward = extra["icm_forward"]
+
+                    latent_obs = icm_encoder(obs)
+                    latent_next_obs = icm_encoder(next_obs)
+
+                    pred_latent_next_obs = icm_forward(latent_obs, action)
+                    icm_reward = jnp.square(pred_latent_next_obs - latent_next_obs).mean(axis=-1)
+                    icm_reward = jnp.where(done, 0.0, icm_reward)
+                    icm_reward *= config["intrinsic"]["ICM"]["reward_coef"]
+
+                    transition_extra["reward_extrinsic"] = transition_extra.get("reward_extrinsic", reward)  # fmt: skip
+                    transition_extra["reward_intrinsic"] = transition_extra.get("reward_intrinsic", jnp.zeros_like(icm_reward)) + icm_reward  # fmt: skip
+                    transition_extra["icm_reward"] = icm_reward
+                    reward += icm_reward
+
                 transition = Transition(
                     obs=obs,
                     action=action,
@@ -78,6 +98,8 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                     #
                     value=value,
                     log_prob=log_prob,
+                    #
+                    extra=transition_extra,
                 )
 
                 run_state = (
@@ -195,6 +217,96 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
                 update_state = (model, optim, batch, advantages, returns, key)
                 return update_state, losses
 
+            def icm_epoch_update(icm_update_state, _):
+                def icm_minibatch_update(model_optim, minibatch):
+                    def inverse_loss_fn(icm_encoder, icm_inverse, transition):
+                        latent_obs = icm_encoder(transition.obs)
+                        latent_next_obs = icm_encoder(transition.next_obs)
+
+                        pred_action_logits = icm_inverse(latent_obs, latent_next_obs)
+                        true_action = jax.nn.one_hot(
+                            transition.action,
+                            num_classes=pred_action_logits.shape[-1],
+                        )
+
+                        bce_loss = -jnp.mean(
+                            jnp.sum(
+                                pred_action_logits * true_action * (1 - transition.done[:, None]),
+                                axis=1,
+                            )
+                        )
+                        return bce_loss * config["intrinsic"]["ICM"]["inverse_loss_coef"]
+
+                    def forward_loss_fn(icm_encoder, icm_forward, transition):
+                        latent_obs = icm_encoder(transition.obs)
+                        latent_next_obs = icm_encoder(transition.next_obs)
+
+                        pred_latent_next_obs = icm_forward(latent_obs, transition.action)
+
+                        error = (latent_next_obs - pred_latent_next_obs) * (1 - transition.done[:, None])
+                        loss = jnp.square(error).mean() * config["intrinsic"]["ICM"]["forward_loss_coef"]
+                        return loss
+
+                    icm_encoder, icm_encoder_optim = model_optim[:2]
+                    icm_inverse, icm_inverse_optim = model_optim[2:4]
+                    icm_forward, icm_forward_optim = model_optim[4:]
+
+                    inverse_loss, (encoder_grads, inverse_grads) = nnx.value_and_grad(
+                        inverse_loss_fn,
+                        argnums=(0, 1),  # w.r.t. both icm_encoder and icm_inverse
+                    )(icm_encoder, icm_inverse, minibatch)
+                    icm_encoder_optim.update(encoder_grads)
+                    icm_inverse_optim.update(inverse_grads)
+
+                    forward_loss, forward_grads = nnx.value_and_grad(
+                        forward_loss_fn,
+                        argnums=1,  # only w.r.t. icm_forward
+                    )(icm_encoder, icm_forward, minibatch)
+                    icm_forward_optim.update(forward_grads)
+
+                    return model_optim, (inverse_loss, forward_loss)
+
+                icm_encoder, icm_encoder_optim = icm_update_state[:2]
+                icm_inverse, icm_inverse_optim = icm_update_state[2:4]
+                icm_forward, icm_forward_optim = icm_update_state[4:6]
+                batch, key = icm_update_state[6:]
+
+                key, permutation_key = jax.random.split(key, 2)
+
+                flat_batch = jax.tree.map(  # shape: (batch_size := n_steps * n_envs, ...)
+                    lambda x: x.reshape((batch_size,) + x.shape[2:]),
+                    batch,
+                )
+                permutation = jax.random.permutation(permutation_key, batch_size)
+                shuffled_joint = jax.tree.map(
+                    lambda x: jnp.take(x, permutation, axis=0),
+                    flat_batch,
+                )
+                minibatches = jax.tree.map(  # shape: (config["training"]["n_minibatches"], minibatch_size, ...)
+                    lambda x: jnp.reshape(x, [config["training"]["n_minibatches"], -1] + list(x.shape[1:])),
+                    shuffled_joint,
+                )
+
+                _, icm_losses = nnx.scan(
+                    icm_minibatch_update,
+                    length=config["intrinsic"]["ICM"]["n_minibatches"],
+                )(
+                    (icm_encoder, icm_encoder_optim, icm_inverse, icm_inverse_optim, icm_forward, icm_forward_optim),
+                    minibatches,
+                )
+
+                icm_update_state = (
+                    icm_encoder,
+                    icm_encoder_optim,
+                    icm_inverse,
+                    icm_inverse_optim,
+                    icm_forward,
+                    icm_forward_optim,
+                    batch,
+                    key,
+                )
+                return icm_update_state, icm_losses
+
             run_state, batch = nnx.scan(
                 step,
                 length=config["training"]["n_batch_steps"],
@@ -248,6 +360,45 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
             )
 
             model, optim, _, _, _, _ = update_state
+
+            if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
+                icm_update_state = (
+                    extra["icm_encoder"],
+                    extra["icm_encoder_optim"],
+                    extra["icm_inverse"],
+                    extra["icm_inverse_optim"],
+                    extra["icm_forward"],
+                    extra["icm_forward_optim"],
+                    batch,
+                    batch_key,
+                )
+
+                icm_update_state, (icm_inverse_loss, icm_forward_loss) = nnx.scan(
+                    icm_epoch_update,
+                    length=config["intrinsic"]["ICM"]["n_epochs"],
+                )(icm_update_state, None)
+
+                metric_info.update(
+                    {
+                        "icm_inverse_loss": icm_inverse_loss.mean(),
+                        "icm_forward_loss": icm_forward_loss.mean(),
+                        #
+                        "reward_extrinsic": batch.extra["reward_extrinsic"].mean(),
+                        "reward_intrinsic": batch.extra["reward_intrinsic"].mean(),
+                        "icm_reward": batch.extra["icm_reward"].mean(),
+                    }
+                )
+
+                extra.update(
+                    {
+                        "icm_encoder": icm_update_state[0],
+                        "icm_encoder_optim": icm_update_state[1],
+                        "icm_inverse": icm_update_state[2],
+                        "icm_inverse_optim": icm_update_state[3],
+                        "icm_forward": icm_update_state[4],
+                        "icm_forward_optim": icm_update_state[5],
+                    }
+                )
 
             run_state = (
                 obs,
@@ -425,6 +576,70 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
         )
 
         extra = {}
+        if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
+            from baxtub.networks.dynamics import DynamicsEncoder, DynamicsForward, DynamicsInverse
+
+            key, icm_encoder_key, icm_forward_key, icm_inverse_key = jax.random.split(key, 4)
+
+            icm_encoder = DynamicsEncoder(
+                din=env.observation_space(env_params).shape[0],
+                layer_width=config["intrinsic"]["ICM"]["encoder"]["layer_width"],
+                n_layers=config["intrinsic"]["ICM"]["encoder"]["n_layers"],
+                dout=config["intrinsic"]["ICM"]["latent_dim"],
+                rngs=nnx.Rngs(icm_encoder_key),
+            )
+            icm_encoder_optim = nnx.Optimizer(
+                icm_encoder,
+                optax.chain(
+                    optax.clip_by_global_norm(config["intrinsic"]["ICM"]["max_grad_norm"]),
+                    optax.adam(config["intrinsic"]["ICM"]["lr"], eps=1e-5),
+                ),
+            )
+
+            icm_forward = DynamicsForward(
+                din=config["intrinsic"]["ICM"]["latent_dim"],
+                layer_width=config["intrinsic"]["ICM"]["forward"]["layer_width"],
+                n_layers=config["intrinsic"]["ICM"]["forward"]["n_layers"],
+                dout=config["intrinsic"]["ICM"]["latent_dim"],
+                n_actions=env.action_space(env_params).n,
+                rngs=nnx.Rngs(icm_forward_key),
+            )
+            icm_forward_optim = nnx.Optimizer(
+                icm_forward,
+                optax.chain(
+                    optax.clip_by_global_norm(config["intrinsic"]["ICM"]["max_grad_norm"]),
+                    optax.adam(config["intrinsic"]["ICM"]["lr"], eps=1e-5),
+                ),
+            )
+
+            icm_inverse = DynamicsInverse(
+                din=config["intrinsic"]["ICM"]["latent_dim"] * 2,
+                layer_width=config["intrinsic"]["ICM"]["inverse"]["layer_width"],
+                n_layers=config["intrinsic"]["ICM"]["inverse"]["n_layers"],
+                n_actions=env.action_space(env_params).n,
+                rngs=nnx.Rngs(icm_inverse_key),
+            )
+            icm_inverse_optim = nnx.Optimizer(
+                icm_inverse,
+                optax.chain(
+                    optax.clip_by_global_norm(config["intrinsic"]["ICM"]["max_grad_norm"]),
+                    optax.adam(config["intrinsic"]["ICM"]["lr"], eps=1e-5),
+                ),
+            )
+
+            extra.update(
+                {
+                    "icm_encoder": icm_encoder,
+                    "icm_encoder_optim": icm_encoder_optim,
+                    "icm_forward": icm_forward,
+                    "icm_forward_optim": icm_forward_optim,
+                    "icm_inverse": icm_inverse,
+                    "icm_inverse_optim": icm_inverse_optim,
+                }
+            )
+
+        run_state = run_state + (extra,)
+
         run_state, _ = nnx.scan(
             batch_step,
             length=n_batches,
