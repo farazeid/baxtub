@@ -398,15 +398,16 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
         else:
             raise NotImplementedError("NNX ActorCriticConv not implemented.")
 
-        tx = optax.chain(
-            optax.clip_by_global_norm(config["training"]["max_grad_norm"]),
-            optax.adam(
-                learning_rate=lr_schedule if config["training"]["anneal_lr"] else config["training"]["lr"],
-                eps=1e-5,
+        optim = nnx.Optimizer(
+            model,
+            optax.chain(
+                optax.clip_by_global_norm(config["training"]["max_grad_norm"]),
+                optax.adam(
+                    learning_rate=lr_schedule if config["training"]["anneal_lr"] else config["training"]["lr"],
+                    eps=1e-5,
+                ),
             ),
         )
-
-        optim = nnx.Optimizer(model, tx)
 
         obs, env_state = env.reset(env_key, env_params)
 
