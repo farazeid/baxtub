@@ -366,7 +366,7 @@ def make_run(config: dict[str, Any]) -> tuple[Callable, list]:
 
             jax.lax.cond(
                 jnp.logical_or(
-                    batch_idx % config["logging"].get("checkpoint_every", 10) == 0,
+                    batch_idx % config["logging"].get("checkpoint_every", jnp.inf) == 0,
                     batch_idx == n_batches - 1,
                 ),
                 do_checkpoint,

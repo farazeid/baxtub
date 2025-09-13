@@ -35,5 +35,5 @@ training:
 
 logging: # every n batches
   metrics_every: 1
-  checkpoint_every: 10
-  # snapshot_every:  # comment-out to only snapshot at end of training
+  # checkpoint_every:  # comment-out to only snapshot at end of training
+  # snapshot_every:
