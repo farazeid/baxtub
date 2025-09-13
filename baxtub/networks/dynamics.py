@@ -74,7 +74,7 @@ class DynamicsForward(nnx.Module):
 class DynamicsInverse(nnx.Module):
     def __init__(
         self,
-        din: int,
+        din: int,  # concatenated latent and next_latent
         layer_width: int,
         n_layers: int,
         n_actions: int,
@@ -82,11 +82,7 @@ class DynamicsInverse(nnx.Module):
     ) -> None:
         assert n_layers >= 2, "n_layers must be at least 2"
 
-        linear1 = nnx.Linear(
-            din * 2,  # concatenated latent and next_latent
-            layer_width,
-            rngs=rngs,
-        )
+        linear1 = nnx.Linear(din, layer_width, rngs=rngs)
 
         self.layers = []
         self.layers.append(linear1)
