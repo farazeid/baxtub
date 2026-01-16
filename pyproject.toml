@@ -15,6 +15,10 @@ dependencies = [
     "wandb>=0.21.1",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [tool.ruff]
 line-length = 120
 
