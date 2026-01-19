@@ -415,7 +415,7 @@ def step(
     config: dict[str, Any],
     env,
     env_params,
-) -> None:
+) -> tuple[Any, Transition]:
     obs, model, optim, env_state, batch_idx, key, extra = run_state
 
     key, action_key, step_key = jax.random.split(key, 3)
