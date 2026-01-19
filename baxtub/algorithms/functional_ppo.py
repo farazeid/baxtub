@@ -5,7 +5,7 @@ import threading
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +28,7 @@ from baxtub.utils.logging import batch_log, create_log_dict
 from baxtub.networks.actorcritic import ActorCritic  # isort:skip
 
 # Import extras here
+from baxtub.algorithms.datatypes import Transition
 from baxtub.algorithms.functional_icm import (
     ICMUpdateState,
     icm_batch_step,
@@ -57,18 +58,10 @@ class UpdateState:
     key: jax.random.PRNGKey
 
 
-class Transition(NamedTuple):
-    obs: jnp.ndarray
-    action: jnp.ndarray
-    next_obs: jnp.ndarray
-    reward: jnp.ndarray
-    done: jnp.ndarray
-    info: jnp.ndarray
-    #
+@struct.dataclass
+class ActorCriticTransition(Transition):
     value: jnp.ndarray
     log_prob: jnp.ndarray
-    #
-    extra: dict[str, Any] = {}
 
 
 def main() -> None:
@@ -309,9 +302,9 @@ def batch_step(
         icm_batch_step_fn = partial(icm_batch_step, config=config, batch_size=batch_size)
 
         icm_update_state = ICMUpdateState(
-            run_state.extra["icm_state"],
-            batch,
-            run_state.key,
+            **vars(run_state.extra["icm_state"]),
+            batch=batch,
+            key=run_state.key,
         )
 
         icm_update_state, metric_info = icm_batch_step_fn(icm_update_state, metric_info)
@@ -455,7 +448,7 @@ def step(
     config: dict[str, Any],
     env,
     env_params,
-) -> tuple[Any, Transition]:
+) -> tuple[Any, ActorCriticTransition]:
     key, action_key, step_key = jax.random.split(run_state.key, 3)
 
     distribution, value = run_state.model(run_state.obs)
@@ -469,18 +462,16 @@ def step(
         env_params,
     )
 
-    transition = Transition(
+    transition = ActorCriticTransition(
         obs=run_state.obs,
         action=action,
         next_obs=next_obs,
         reward=reward,
         done=done,
         info=info,
-        #
+        extra={},
         value=value,
         log_prob=log_prob,
-        #
-        extra={},
     )
 
     if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
