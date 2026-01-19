@@ -27,6 +27,14 @@ from baxtub.utils.logging import batch_log, create_log_dict
 # Import Neural Network here
 from baxtub.networks.actorcritic import ActorCritic  # isort:skip
 
+# Import extras here
+from baxtub.algorithms.functional_icm import (
+    ICMUpdateState,
+    icm_batch_step,
+    icm_step,
+    init_icm,
+)
+
 
 @struct.dataclass
 class RunState:
@@ -196,6 +204,14 @@ def run(
         extra := {},
     )
 
+    if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
+        run_state.extra["icm_state"] = init_icm(
+            key,
+            env.observation_space(env_params),
+            env.action_space(env_params),
+            config,
+        )
+
     batch_step_fn = partial(
         batch_step,
         n_batches=n_batches,
@@ -288,6 +304,17 @@ def batch_step(
             "entropy_loss": entropy_loss.mean(),
         }
     )
+
+    if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
+        icm_batch_step_fn = partial(icm_batch_step, config=config, batch_size=batch_size)
+
+        icm_update_state = ICMUpdateState(
+            run_state.extra["icm_state"],
+            batch,
+            run_state.key,
+        )
+
+        icm_update_state, metric_info = icm_batch_step_fn(icm_update_state, metric_info)
 
     # region logging
 
@@ -455,6 +482,15 @@ def step(
         #
         extra={},
     )
+
+    if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
+        icm_step_fn = partial(icm_step, config=config)
+
+        transition = icm_step_fn(
+            run_state.extra["icm_state"].icm_encoder,
+            run_state.extra["icm_state"].icm_forward,
+            transition,
+        )
 
     run_state = run_state.replace(
         obs=next_obs,
