@@ -13,7 +13,7 @@ import optax
 import orbax.checkpoint
 import yaml
 from craftax.craftax_env import make_craftax_env_from_name
-from flax import nnx
+from flax import nnx, struct
 
 import wandb
 from baxtub.environments.wrappers import (
@@ -26,6 +26,27 @@ from baxtub.utils.logging import batch_log, create_log_dict
 
 # Import Neural Network here
 from baxtub.networks.actorcritic import ActorCritic  # isort:skip
+
+
+@struct.dataclass
+class RunState:
+    obs: jnp.ndarray
+    model: nnx.Module
+    optim: nnx.Optimizer
+    env_state: Any
+    batch_idx: int
+    key: jax.random.PRNGKey
+    extra: dict
+
+
+@struct.dataclass
+class UpdateState:
+    model: nnx.Module
+    optim: nnx.Optimizer
+    batch: jnp.ndarray
+    advantages: jnp.ndarray
+    returns: jnp.ndarray
+    key: jax.random.PRNGKey
 
 
 class Transition(NamedTuple):
@@ -140,7 +161,7 @@ def run(
     env_params: Any,
     lr_schedule: Callable[[int], float],
 ) -> tuple[Any, Any]:
-    key, model_key, env_key, batch_key = jax.random.split(rng, 4)
+    key, model_key, env_key, run_key = jax.random.split(rng, 4)
 
     if "Symbolic" in config["env"]["id"]:
         model = ActorCritic(
@@ -165,17 +186,15 @@ def run(
 
     obs, env_state = env.reset(env_key, env_params)
 
-    run_state = (
+    run_state = RunState(
         obs,
         model,
         optim,
         env_state,
         batch_idx := 0,
-        batch_key,
+        run_key,
+        extra := {},
     )
-
-    extra = {}
-    run_state = run_state + (extra,)
 
     batch_step_fn = partial(
         batch_step,
@@ -212,7 +231,6 @@ def batch_step(
         step_fn,
         length=config["training"]["n_batch_steps"],
     )(run_state, None)
-    obs, model, optim, env_state, batch_idx, batch_key, extra = run_state
 
     rollout_step_fn = partial(rollout_step, config=config)
 
@@ -242,18 +260,25 @@ def batch_step(
 
     epoch_update_fn = partial(epoch_update, config=config, batch_size=batch_size)
 
-    update_state = (
-        model,
-        optim,
+    update_state = UpdateState(
+        run_state.model,
+        run_state.optim,
         batch,
         advantages,
         returns,
-        batch_key,
+        run_state.key,
     )
     update_state, (loss, (policy_loss, value_loss, entropy_loss)) = nnx.scan(
         epoch_update_fn,
         length=config["training"]["n_epochs"],
     )(update_state, None)
+
+    run_state = run_state.replace(
+        model=update_state.model,
+        optim=update_state.optim,
+        batch_idx=run_state.batch_idx + 1,
+        key=update_state.key,
+    )
 
     metric_info.update(
         {
@@ -262,19 +287,6 @@ def batch_step(
             "value_loss": value_loss.mean(),
             "entropy_loss": entropy_loss.mean(),
         }
-    )
-
-    model, optim, _, _, _, _ = update_state
-
-    run_state = (
-        obs,
-        model,
-        optim,
-        env_state,
-        batch_idx + 1,
-        batch_key,
-        #
-        extra,
     )
 
     # region logging
@@ -296,7 +308,7 @@ def batch_step(
         jax.debug.callback(
             metrics_callback,
             metric_info,
-            batch_idx,
+            run_state.batch_idx,
         )
 
     def do_checkpoint():
@@ -326,10 +338,10 @@ def batch_step(
             logging_threads.append(checkpoint_thread)
             checkpoint_thread.start()
 
-        _, model_state = nnx.split(model)
+        _, model_state = nnx.split(run_state.model)
         jax.debug.callback(
             checkpoint_callback,
-            batch_idx,
+            run_state.batch_idx,
             model_state,
         )
 
@@ -360,26 +372,26 @@ def batch_step(
             logging_threads.append(snapshot_thread)
             snapshot_thread.start()
 
-        _, model_state = nnx.split(model)
-        optim_state = nnx.state(optim)
+        _, model_state = nnx.split(run_state.model)
+        optim_state = nnx.state(run_state.optim)
         snapshot = {
-            "obs": obs,
+            "obs": run_state.obs,
             "model_state": model_state,
             "optim_state": optim_state,
-            "env_state": env_state,
-            "batch_idx": batch_idx,
-            "batch_key": batch_key,
+            "env_state": run_state.env_state,
+            "batch_idx": run_state.batch_idx,
+            "run_key": run_state.key,
         }
         jax.debug.callback(
             snapshot_callback,
-            batch_idx,
+            run_state.batch_idx,
             snapshot,
         )
 
     jax.lax.cond(
         jnp.logical_or(
-            batch_idx % config["logging"].get("metrics_every", 1) == 0,
-            batch_idx == n_batches - 1,
+            run_state.batch_idx % config["logging"].get("metrics_every", 1) == 0,
+            run_state.batch_idx == n_batches - 1,
         ),
         do_metrics,
         lambda: None,
@@ -387,8 +399,8 @@ def batch_step(
 
     jax.lax.cond(
         jnp.logical_or(
-            batch_idx % config["logging"].get("checkpoint_every", jnp.inf) == 0,
-            batch_idx == n_batches - 1,
+            run_state.batch_idx % config["logging"].get("checkpoint_every", jnp.inf) == 0,
+            run_state.batch_idx == n_batches - 1,
         ),
         do_checkpoint,
         lambda: None,
@@ -396,8 +408,8 @@ def batch_step(
 
     jax.lax.cond(
         jnp.logical_or(
-            batch_idx % config["logging"].get("snapshot_every", jnp.inf) == 0,
-            batch_idx == n_batches - 1,
+            run_state.batch_idx % config["logging"].get("snapshot_every", jnp.inf) == 0,
+            run_state.batch_idx == n_batches - 1,
         ),
         do_snapshot,
         lambda: None,
@@ -416,23 +428,21 @@ def step(
     env,
     env_params,
 ) -> tuple[Any, Transition]:
-    obs, model, optim, env_state, batch_idx, key, extra = run_state
+    key, action_key, step_key = jax.random.split(run_state.key, 3)
 
-    key, action_key, step_key = jax.random.split(key, 3)
-
-    distribution, value = model(obs)
+    distribution, value = run_state.model(run_state.obs)
     action = distribution.sample(seed=action_key)
     log_prob = distribution.log_prob(action)
 
     next_obs, env_state, reward, done, info = env.step(
         step_key,
-        env_state,
+        run_state.env_state,
         action,
         env_params,
     )
 
     transition = Transition(
-        obs=obs,
+        obs=run_state.obs,
         action=action,
         next_obs=next_obs,
         reward=reward,
@@ -445,15 +455,10 @@ def step(
         extra={},
     )
 
-    run_state = (
-        next_obs,
-        model,
-        optim,
-        env_state,
-        batch_idx,
-        key,
-        #
-        extra,
+    run_state = run_state.replace(
+        obs=next_obs,
+        env_state=env_state,
+        key=key,
     )
 
     return run_state, transition
@@ -483,17 +488,15 @@ def rollout_step(
 
 
 def epoch_update(
-    update_state,
+    update_state: UpdateState,
     _,
     #
     config,
     batch_size: int,
-):
-    model, optim, batch, advantages, returns, key = update_state
+) -> tuple[UpdateState, Any]:
+    key, permutation_key = jax.random.split(update_state.key, 2)
 
-    key, permutation_key = jax.random.split(key, 2)
-
-    joint = (batch, advantages, returns)  # shape: (n_steps, n_envs, ...)
+    joint = (update_state.batch, update_state.advantages, update_state.returns)  # shape: (n_steps, n_envs, ...)
     flat_joint = jax.tree.map(  # shape: (batch_size := n_steps * n_envs, ...)
         lambda x: x.reshape((batch_size,) + x.shape[2:]),
         joint,
@@ -510,13 +513,12 @@ def epoch_update(
 
     minibatch_update_fn = partial(minibatch_update, config=config)
 
-    _, losses = nnx.scan(
+    (model, optim), losses = nnx.scan(
         minibatch_update_fn,
         length=config["training"]["n_minibatches"],
-    )((model, optim), minibatches)
+    )((update_state.model, update_state.optim), minibatches)
 
-    update_state = (model, optim, batch, advantages, returns, key)
-    return update_state, losses
+    return update_state.replace(model=model, optim=optim, key=key), losses
 
 
 def minibatch_update(
