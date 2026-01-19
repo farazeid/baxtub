@@ -297,13 +297,14 @@ def batch_step(
             batch_idx: int,
         ) -> None:
             # Add NUM_REPEATS for batch logging compatibility
-            config["NUM_REPEATS"] = config["n_runs"]
-            config["DEBUG"] = True  # Add DEBUG flag for batch logging
-            config["NUM_STEPS"] = config["training"]["n_batch_steps"]  # Steps per batch, not total steps
-            config["NUM_ENVS"] = config["n_envs"]
+            log_config = config.copy()
+            log_config["NUM_REPEATS"] = config["n_runs"]
+            log_config["DEBUG"] = True  # Add DEBUG flag for batch logging
+            log_config["NUM_STEPS"] = config["training"]["n_batch_steps"]  # Steps per batch, not total steps
+            log_config["NUM_ENVS"] = config["n_envs"]
 
-            to_log = create_log_dict(metric_info, config)
-            batch_log(batch_idx, to_log, config)
+            to_log = create_log_dict(metric_info, log_config)
+            batch_log(batch_idx, to_log, log_config)
 
         jax.debug.callback(
             metrics_callback,
