@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx, struct
 
-from baxtub.algorithms.functional_ppo import Transition
+from baxtub.algorithms.datatypes import Transition
 from baxtub.networks.dynamics import DynamicsEncoder, DynamicsForward, DynamicsInverse
 
 
@@ -105,8 +105,8 @@ def icm_step(
     icm_reward = jnp.where(transition.done, 0.0, icm_reward)
     icm_reward *= config["intrinsic"]["ICM"]["reward_coef"]
 
-    extra = transition.extra.copy()
-    reward = transition.reward.copy()
+    extra = transition.extra
+    reward = transition.reward
     extra["reward_extrinsic"] = transition.extra.get("reward_extrinsic", transition.reward)  # fmt: skip
     extra["reward_intrinsic"] = transition.extra.get("reward_intrinsic", jnp.zeros_like(icm_reward)) + icm_reward  # fmt: skip
     extra["icm_reward"] = icm_reward
@@ -120,9 +120,12 @@ def icm_batch_step(
     metric_info: dict[str, float],
     #
     config: dict[str, Any],
+    batch_size: int,
 ) -> tuple[ICMState, dict[str, float]]:
+    icm_epoch_update_fn = partial(icm_epoch_update, config=config, batch_size=batch_size)
+
     icm_update_state, (icm_inverse_loss, icm_forward_loss) = nnx.scan(
-        icm_epoch_update,
+        icm_epoch_update_fn,
         length=config["intrinsic"]["ICM"]["n_epochs"],
     )(icm_update_state, None)
 
@@ -163,11 +166,13 @@ def icm_epoch_update(
         shuffled_joint,
     )
 
+    icm_minibatch_update_fn = partial(icm_minibatch_update, config=config)
+
     _, icm_losses = nnx.scan(
-        icm_minibatch_update,
+        icm_minibatch_update_fn,
         length=config["intrinsic"]["ICM"]["n_minibatches"],
     )(
-        (
+        ICMState(
             icm_update_state.icm_encoder,
             icm_update_state.icm_encoder_optim,
             icm_update_state.icm_inverse,
@@ -187,7 +192,7 @@ def icm_minibatch_update(
     minibatch,
     #
     config,
-) -> tuple[ICMUpdateState, tuple[float, float]]:
+) -> tuple[ICMState, tuple[float, float]]:
     inverse_loss_fn_partial = partial(inverse_loss_fn, config=config)
     forward_loss_fn_partial = partial(forward_loss_fn, config=config)
 
@@ -195,13 +200,14 @@ def icm_minibatch_update(
         inverse_loss_fn_partial,
         argnums=(0, 1),  # w.r.t. both icm_encoder and icm_inverse
     )(icm_state.icm_encoder, icm_state.icm_inverse, minibatch)
-    icm_state.icm_encoder_optim.update(encoder_grads)
-    icm_state.icm_inverse_optim.update(inverse_grads)
 
     forward_loss, forward_grads = nnx.value_and_grad(
         forward_loss_fn_partial,
         argnums=1,  # only w.r.t. icm_forward
     )(icm_state.icm_encoder, icm_state.icm_forward, minibatch)
+
+    icm_state.icm_encoder_optim.update(encoder_grads)
+    icm_state.icm_inverse_optim.update(inverse_grads)
     icm_state.icm_forward_optim.update(forward_grads)
 
     return icm_state, (inverse_loss, forward_loss)
