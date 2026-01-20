@@ -558,15 +558,15 @@ def minibatch_update(
     model, optim = model_optim
     batch, advantages, returns = minibatch
 
-    loss_fn_partial = partial(loss_fn, config=config)
+    loss_fn = partial(ppo_loss, config=config)
 
-    losses, grads = nnx.value_and_grad(loss_fn_partial, has_aux=True)(model, batch, advantages, returns)
+    losses, grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, batch, advantages, returns)
     optim.update(grads)
 
     return model_optim, losses
 
 
-def loss_fn(
+def ppo_loss(
     model,
     transition,
     advantages,

@@ -193,16 +193,16 @@ def icm_minibatch_update(
     #
     config,
 ) -> tuple[ICMState, tuple[float, float]]:
-    inverse_loss_fn_partial = partial(inverse_loss_fn, config=config)
-    forward_loss_fn_partial = partial(forward_loss_fn, config=config)
+    inverse_loss_fn = partial(icm_inverse_loss, config=config)
+    forward_loss_fn = partial(icm_forward_loss, config=config)
 
     inverse_loss, (encoder_grads, inverse_grads) = nnx.value_and_grad(
-        inverse_loss_fn_partial,
+        inverse_loss_fn,
         argnums=(0, 1),  # w.r.t. both icm_encoder and icm_inverse
     )(icm_state.icm_encoder, icm_state.icm_inverse, minibatch)
 
     forward_loss, forward_grads = nnx.value_and_grad(
-        forward_loss_fn_partial,
+        forward_loss_fn,
         argnums=1,  # only w.r.t. icm_forward
     )(icm_state.icm_encoder, icm_state.icm_forward, minibatch)
 
@@ -213,7 +213,7 @@ def icm_minibatch_update(
     return icm_state, (inverse_loss, forward_loss)
 
 
-def inverse_loss_fn(
+def icm_inverse_loss(
     icm_encoder,
     icm_inverse,
     transition,
@@ -238,7 +238,7 @@ def inverse_loss_fn(
     return bce_loss * config["intrinsic"]["ICM"]["inverse_loss_coef"]
 
 
-def forward_loss_fn(
+def icm_forward_loss(
     icm_encoder,
     icm_forward,
     transition,
