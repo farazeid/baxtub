@@ -1,3 +1,5 @@
+# Intrinsic Curiosity Module (ICM): https://arxiv.org/pdf/1705.05363
+
 from functools import partial
 from typing import Any
 
