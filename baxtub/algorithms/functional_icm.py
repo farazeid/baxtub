@@ -5,9 +5,12 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx, struct
+from gymnax.environments import spaces
 
 from baxtub.algorithms.datatypes import Transition
 from baxtub.networks.dynamics import DynamicsEncoder, DynamicsForward, DynamicsInverse
+
+type ICMLosses = tuple[jax.Array, jax.Array]
 
 
 @struct.dataclass
@@ -22,15 +25,15 @@ class ICMState:
 
 @struct.dataclass
 class ICMUpdateState(ICMState):
-    batch: dict[str, Any]
+    batch: Transition
     key: jax.random.PRNGKey
 
 
 def init_icm(
     key: jax.random.PRNGKey,
-    observation_space,
-    action_space,
-    config,
+    observation_space: spaces.Box,
+    action_space: spaces.Discrete,
+    config: dict[str, Any],
 ) -> ICMState:
     key, icm_encoder_key, icm_forward_key, icm_inverse_key = jax.random.split(key, 4)
 
@@ -121,7 +124,7 @@ def icm_batch_step(
     #
     config: dict[str, Any],
     batch_size: int,
-) -> tuple[ICMState, dict[str, float]]:
+) -> tuple[ICMUpdateState, dict[str, jax.Array]]:
     icm_epoch_update_fn = partial(icm_epoch_update, config=config, batch_size=batch_size)
 
     icm_update_state, (icm_inverse_loss, icm_forward_loss) = nnx.scan(
@@ -145,11 +148,11 @@ def icm_batch_step(
 
 def icm_epoch_update(
     icm_update_state: ICMUpdateState,
-    _,
+    _: None,
     #
-    config,
-    batch_size,
-) -> tuple[ICMUpdateState, tuple[float, float]]:
+    config: dict[str, Any],
+    batch_size: int,
+) -> tuple[ICMUpdateState, ICMLosses]:
     key, permutation_key = jax.random.split(icm_update_state.key, 2)
 
     flat_batch = jax.tree.map(  # shape: (batch_size := n_steps * n_envs, ...)
@@ -189,10 +192,10 @@ def icm_epoch_update(
 
 def icm_minibatch_update(
     icm_state: ICMState,
-    minibatch,
+    minibatch: Transition,
     #
-    config,
-) -> tuple[ICMState, tuple[float, float]]:
+    config: dict[str, Any],
+) -> tuple[ICMState, ICMLosses]:
     inverse_loss_fn = partial(icm_inverse_loss, config=config)
     forward_loss_fn = partial(icm_forward_loss, config=config)
 
@@ -214,12 +217,12 @@ def icm_minibatch_update(
 
 
 def icm_inverse_loss(
-    icm_encoder,
-    icm_inverse,
-    transition,
+    icm_encoder: nnx.Module,
+    icm_inverse: nnx.Module,
+    transition: Transition,
     #
-    config,
-) -> float:
+    config: dict[str, Any],
+) -> jax.Array:
     latent_obs = icm_encoder(transition.obs)
     latent_next_obs = icm_encoder(transition.next_obs)
 
@@ -239,12 +242,12 @@ def icm_inverse_loss(
 
 
 def icm_forward_loss(
-    icm_encoder,
-    icm_forward,
-    transition,
+    icm_encoder: nnx.Module,
+    icm_forward: nnx.Module,
+    transition: Transition,
     #
-    config,
-) -> float:
+    config: dict[str, Any],
+) -> jax.Array:
     latent_obs = icm_encoder(transition.obs)
     latent_next_obs = icm_encoder(transition.next_obs)
 

@@ -14,6 +14,7 @@ import orbax.checkpoint
 import yaml
 from craftax.craftax_env import make_craftax_env_from_name
 from flax import nnx, struct
+from gymnax.environments import environment
 
 import wandb
 from baxtub.environments.wrappers import (
@@ -36,32 +37,34 @@ from baxtub.algorithms.functional_icm import (
     init_icm,
 )
 
+type PPOLosses = tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]
+
+
+@struct.dataclass
+class ActorCriticTransition(Transition):
+    value: jax.Array
+    log_prob: jax.Array
+
 
 @struct.dataclass
 class RunState:
-    obs: jnp.ndarray
+    obs: jax.Array
     model: nnx.Module
     optim: nnx.Optimizer
-    env_state: Any
+    env_state: environment.EnvState
     batch_idx: int
     key: jax.random.PRNGKey
-    extra: dict
+    extra: dict[str, Any]
 
 
 @struct.dataclass
 class UpdateState:
     model: nnx.Module
     optim: nnx.Optimizer
-    batch: jnp.ndarray
-    advantages: jnp.ndarray
-    returns: jnp.ndarray
+    batch: ActorCriticTransition
+    advantages: jax.Array
+    returns: jax.Array
     key: jax.random.PRNGKey
-
-
-@struct.dataclass
-class ActorCriticTransition(Transition):
-    value: jnp.ndarray
-    log_prob: jnp.ndarray
 
 
 def main() -> None:
@@ -158,10 +161,10 @@ def run(
     n_batches: int,
     batch_size: int,
     logging_threads: list[threading.Thread],
-    env: Any,
-    env_params: Any,
+    env: environment.Environment,
+    env_params: environment.EnvParams,
     lr_schedule: Callable[[int], float],
-) -> tuple[Any, Any]:
+) -> tuple[RunState, None]:
     key, model_key, env_key, run_key = jax.random.split(rng, 4)
 
     if "Symbolic" in config["env"]["id"]:
@@ -224,16 +227,16 @@ def run(
 
 
 def batch_step(
-    run_state,
-    _,
+    run_state: RunState,
+    _: None,
     #
     n_batches: int,
     batch_size: int,
     config: dict[str, Any],
     logging_threads: list[threading.Thread],
-    env,
-    env_params,
-):
+    env: environment.Environment,
+    env_params: environment.EnvParams,
+) -> tuple[RunState, None]:
     step_fn = partial(step, config=config, env=env, env_params=env_params)
 
     run_state, batch = nnx.scan(
@@ -332,8 +335,8 @@ def batch_step(
             run_state.batch_idx,
         )
 
-    def do_checkpoint():
-        def save_checkpoint(batch_idx, model_state) -> None:
+    def do_checkpoint() -> None:
+        def save_checkpoint(batch_idx: int, model_state: nnx.State) -> None:
             try:
                 with tempfile.TemporaryDirectory() as temp_dir:
                     checkpoint_path = Path(temp_dir) / f"checkpoint_{batch_idx}"
@@ -350,7 +353,7 @@ def batch_step(
             except Exception as e:
                 print(f"Error saving checkpoint at batch {batch_idx}: {e}")
 
-        def checkpoint_callback(batch_idx, model_state) -> None:
+        def checkpoint_callback(batch_idx: int, model_state: nnx.State) -> None:
             checkpoint_thread = threading.Thread(
                 target=save_checkpoint,
                 args=(batch_idx, model_state),
@@ -366,8 +369,8 @@ def batch_step(
             model_state,
         )
 
-    def do_snapshot():
-        def save_snapshot(batch_idx, snapshot) -> None:
+    def do_snapshot() -> None:
+        def save_snapshot(batch_idx: int, snapshot: dict[str, Any]) -> None:
             try:
                 with tempfile.TemporaryDirectory() as temp_dir:
                     snapshot_path = Path(temp_dir) / f"snapshot_{batch_idx}"
@@ -384,7 +387,7 @@ def batch_step(
             except Exception as e:
                 print(f"Error saving snapshot at batch {batch_idx}: {e}")
 
-        def snapshot_callback(batch_idx, snapshot) -> None:
+        def snapshot_callback(batch_idx: int, snapshot: dict[str, Any]) -> None:
             snapshot_thread = threading.Thread(
                 target=save_snapshot,
                 args=(batch_idx, snapshot),
@@ -442,13 +445,13 @@ def batch_step(
 
 
 def step(
-    run_state,
-    _,
+    run_state: RunState,
+    _: None,
     #
     config: dict[str, Any],
-    env,
-    env_params,
-) -> tuple[Any, ActorCriticTransition]:
+    env: environment.Environment,
+    env_params: environment.EnvParams,
+) -> tuple[RunState, ActorCriticTransition]:
     key, action_key, step_key = jax.random.split(run_state.key, 3)
 
     distribution, value = run_state.model(run_state.obs)
@@ -493,11 +496,11 @@ def step(
 
 
 def rollout_step(
-    carry,
-    transition,
+    carry: tuple[jax.Array, jax.Array, jax.Array],
+    transition: ActorCriticTransition,
     #
-    config,
-):
+    config: dict[str, Any],
+) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
     next_value, next_done, prev_advantage = carry
     reward = transition.reward
     value = transition.value
@@ -517,11 +520,11 @@ def rollout_step(
 
 def epoch_update(
     update_state: UpdateState,
-    _,
+    _: None,
     #
-    config,
+    config: dict[str, Any],
     batch_size: int,
-) -> tuple[UpdateState, Any]:
+) -> tuple[UpdateState, PPOLosses]:
     key, permutation_key = jax.random.split(update_state.key, 2)
 
     joint = (update_state.batch, update_state.advantages, update_state.returns)  # shape: (n_steps, n_envs, ...)
@@ -550,11 +553,11 @@ def epoch_update(
 
 
 def minibatch_update(
-    model_optim,
-    minibatch,
+    model_optim: tuple[nnx.Module, nnx.Optimizer],
+    minibatch: tuple[ActorCriticTransition, jax.Array, jax.Array],
     #
-    config,
-):
+    config: dict[str, Any],
+) -> tuple[tuple[nnx.Module, nnx.Optimizer], PPOLosses]:
     model, optim = model_optim
     batch, advantages, returns = minibatch
 
@@ -567,13 +570,13 @@ def minibatch_update(
 
 
 def ppo_loss(
-    model,
-    transition,
-    advantages,
-    returns,
+    model: nnx.Module,
+    transition: ActorCriticTransition,
+    advantages: jax.Array,
+    returns: jax.Array,
     #
-    config,
-):
+    config: dict[str, Any],
+) -> PPOLosses:
     distribution, new_value = model(transition.obs)
     new_log_prob = distribution.log_prob(transition.action)
     entropy = distribution.entropy()

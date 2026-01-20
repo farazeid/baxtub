@@ -1,5 +1,5 @@
-entity: baxtub
-project: development
+entity: dum-e
+project: self-learning
 experiment: ppo-crafter-icm
 
 seed: 42
