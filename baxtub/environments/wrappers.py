@@ -1,14 +1,13 @@
 from functools import partial
-from typing import Any, Optional, Tuple, Union
+from typing import Any
 
 import chex
 import jax
 import jax.numpy as jnp
-import numpy as np
 from flax import struct
 
 
-class GymnaxWrapper(object):
+class GymnaxWrapper:
     """Base class for Gymnax wrappers."""
 
     def __init__(self, env):
@@ -59,18 +58,14 @@ class AutoResetEnvWrapper(GymnaxWrapper):
     @partial(jax.jit, static_argnums=(0, 4))
     def step(self, rng, state, action, params=None):
         rng, _rng = jax.random.split(rng)
-        obs_st, state_st, reward, done, info = self._env.step(
-            _rng, state, action, params
-        )
+        obs_st, state_st, reward, done, info = self._env.step(_rng, state, action, params)
 
         rng, _rng = jax.random.split(rng)
         obs_re, state_re = self._env.reset(_rng, params)
 
         # Auto-reset environment based on termination
         def auto_reset(done, state_re, state_st, obs_re, obs_st):
-            state = jax.tree_map(
-                lambda x, y: jax.lax.select(done, x, y), state_re, state_st
-            )
+            state = jax.tree_map(lambda x, y: jax.lax.select(done, x, y), state_re, state_st)
             obs = jax.lax.select(done, obs_re, obs_st)
 
             return obs, state
@@ -93,9 +88,7 @@ class OptimisticResetVecEnvWrapper(GymnaxWrapper):
 
         self.num_envs = num_envs
         self.reset_ratio = reset_ratio
-        assert num_envs % reset_ratio == 0, (
-            "Reset ratio must perfectly divide num envs."
-        )
+        assert num_envs % reset_ratio == 0, "Reset ratio must perfectly divide num envs."
         self.num_resets = self.num_envs // reset_ratio
 
         self.reset_fn = jax.vmap(self._env.reset, in_axes=(0, None))
@@ -135,9 +128,7 @@ class OptimisticResetVecEnvWrapper(GymnaxWrapper):
 
         # Auto-reset environment based on termination
         def auto_reset(done, state_re, state_st, obs_re, obs_st):
-            state = jax.tree_map(
-                lambda x, y: jax.lax.select(done, x, y), state_re, state_st
-            )
+            state = jax.tree_map(lambda x, y: jax.lax.select(done, x, y), state_re, state_st)
             obs = jax.lax.select(done, obs_re, obs_st)
 
             return state, obs
@@ -174,22 +165,18 @@ class LogWrapper(GymnaxWrapper):
         self,
         key: chex.PRNGKey,
         state,
-        action: Union[int, float],
+        action: int | float,
         params=None,
     ):
-        obs, env_state, reward, done, info = self._env.step(
-            key, state.env_state, action, params
-        )
+        obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
         new_episode_return = state.episode_returns + reward
         new_episode_length = state.episode_lengths + 1
         state = LogEnvState(
             env_state=env_state,
             episode_returns=new_episode_return * (1 - done),
             episode_lengths=new_episode_length * (1 - done),
-            returned_episode_returns=state.returned_episode_returns * (1 - done)
-            + new_episode_return * done,
-            returned_episode_lengths=state.returned_episode_lengths * (1 - done)
-            + new_episode_length * done,
+            returned_episode_returns=state.returned_episode_returns * (1 - done) + new_episode_return * done,
+            returned_episode_lengths=state.returned_episode_lengths * (1 - done) + new_episode_length * done,
             timestep=state.timestep + 1,
         )
         info["returned_episode_returns"] = state.returned_episode_returns

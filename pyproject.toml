@@ -37,8 +37,11 @@ select = [
     "C90", # mccabe cyclomatic complexity
 ]
 ignore = [
-    "S101",  # assert
-    "S311",  # requiring cryptographicly secure rng
-    "UP046", # generic issue
-    "E501",  # line length - already in ruff formatter
+    "ANN204", # __init__ return type
+    "S101",   # assert
+    "N803",   # lowercase parameter name
+    "N806",   # lowercase variable name
+    "E501",   # line length - already in ruff formatter
+    "S311",   # requiring cryptographicly secure rng
+    "UP046",  # generic issue
 ]
