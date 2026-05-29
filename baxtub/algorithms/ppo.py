@@ -4,6 +4,7 @@ import argparse
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import orbax.checkpoint
 import yaml
@@ -25,7 +27,6 @@ from baxtub.environments.wrappers import (
     LogWrapper,
     OptimisticResetVecEnvWrapper,
 )
-from baxtub.utils.logging import batch_log, create_log_dict
 
 # Import Neural Network here
 from baxtub.networks.actorcritic import ActorCritic  # isort:skip
@@ -197,9 +198,9 @@ def run(
         model,
         optim,
         env_state,
-        batch_idx := 0,
+        0,
         run_key,
-        extra := {},
+        {},
     )
 
     if config.get("intrinsic", False) and config["intrinsic"].get("ICM", False):
@@ -315,110 +316,12 @@ def batch_step(
 
     # region logging
 
-    def do_metrics() -> None:
-        def metrics_callback(
-            metric_info: dict[str, Any],
-            batch_idx: int,
-        ) -> None:
-            # Add NUM_REPEATS for batch logging compatibility
-            log_config = config.copy()
-            log_config["NUM_REPEATS"] = config["n_runs"]
-            log_config["DEBUG"] = True  # Add DEBUG flag for batch logging
-            log_config["NUM_STEPS"] = config["training"]["n_batch_steps"]  # Steps per batch, not total steps
-            log_config["NUM_ENVS"] = config["n_envs"]
-
-            to_log = create_log_dict(metric_info, log_config)
-            batch_log(batch_idx, to_log, log_config)
-
-        jax.debug.callback(
-            metrics_callback,
-            metric_info,
-            run_state.batch_idx,
-        )
-
-    def do_checkpoint() -> None:
-        def save_checkpoint(batch_idx: int, model_state: nnx.State) -> None:
-            try:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    checkpoint_path = Path(temp_dir) / f"checkpoint_{batch_idx}"
-                    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                    checkpointer.save(checkpoint_path, model_state)
-
-                    artifact = wandb.Artifact(
-                        name=f"model_checkpoint_{batch_idx}",
-                        type="model",
-                        description=f"Model checkpoint at batch {batch_idx}",
-                    )
-                    artifact.add_dir(str(checkpoint_path))
-                    wandb.log_artifact(artifact)
-            except Exception as e:
-                print(f"Error saving checkpoint at batch {batch_idx}: {e}")
-
-        def checkpoint_callback(batch_idx: int, model_state: nnx.State) -> None:
-            checkpoint_thread = threading.Thread(
-                target=save_checkpoint,
-                args=(batch_idx, model_state),
-                daemon=False,
-            )
-            logging_threads.append(checkpoint_thread)
-            checkpoint_thread.start()
-
-        _, model_state = nnx.split(run_state.model)
-        jax.debug.callback(
-            checkpoint_callback,
-            run_state.batch_idx,
-            model_state,
-        )
-
-    def do_snapshot() -> None:
-        def save_snapshot(batch_idx: int, snapshot: dict[str, Any]) -> None:
-            try:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    snapshot_path = Path(temp_dir) / f"snapshot_{batch_idx}"
-                    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                    checkpointer.save(snapshot_path, snapshot)
-
-                    artifact = wandb.Artifact(
-                        name=f"full_snapshot_{batch_idx}",
-                        type="snapshot",
-                        description=f"Complete training snapshot at batch {batch_idx}",
-                    )
-                    artifact.add_dir(str(snapshot_path))
-                    wandb.log_artifact(artifact)
-            except Exception as e:
-                print(f"Error saving snapshot at batch {batch_idx}: {e}")
-
-        def snapshot_callback(batch_idx: int, snapshot: dict[str, Any]) -> None:
-            snapshot_thread = threading.Thread(
-                target=save_snapshot,
-                args=(batch_idx, snapshot),
-                daemon=False,
-            )
-            logging_threads.append(snapshot_thread)
-            snapshot_thread.start()
-
-        _, model_state = nnx.split(run_state.model)
-        optim_state = nnx.state(run_state.optim)
-        snapshot = {
-            "obs": run_state.obs,
-            "model_state": model_state,
-            "optim_state": optim_state,
-            "env_state": run_state.env_state,
-            "batch_idx": run_state.batch_idx,
-            "run_key": run_state.key,
-        }
-        jax.debug.callback(
-            snapshot_callback,
-            run_state.batch_idx,
-            snapshot,
-        )
-
     jax.lax.cond(
         jnp.logical_or(
             run_state.batch_idx % config["logging"].get("metrics_every", 1) == 0,
             run_state.batch_idx == n_batches - 1,
         ),
-        do_metrics,
+        lambda: do_metrics(metric_info, run_state.batch_idx, config),
         lambda: None,
     )
 
@@ -427,7 +330,7 @@ def batch_step(
             run_state.batch_idx % config["logging"].get("checkpoint_every", jnp.inf) == 0,
             run_state.batch_idx == n_batches - 1,
         ),
-        do_checkpoint,
+        lambda: do_checkpoint(run_state.model, run_state.batch_idx, logging_threads),
         lambda: None,
     )
 
@@ -436,7 +339,7 @@ def batch_step(
             run_state.batch_idx % config["logging"].get("snapshot_every", jnp.inf) == 0,
             run_state.batch_idx == n_batches - 1,
         ),
-        do_snapshot,
+        lambda: do_snapshot(run_state, run_state.batch_idx, logging_threads),
         lambda: None,
     )
 
@@ -621,6 +524,198 @@ def ppo_loss(
 
     loss = policy_loss + value_loss * config["training"]["vf_coef"] - entropy_loss * config["training"]["ent_coef"]
     return loss, (policy_loss, value_loss, entropy_loss)
+
+
+batch_logs = {}
+log_times = []
+
+
+def do_metrics(  # noqa: C901
+    metric_info: dict[str, Any],
+    batch_idx: jax.Array,
+    config: dict[str, Any],
+) -> None:
+    def metrics_callback(  # noqa: C901
+        metric_info: dict[str, Any],
+        batch_idx: int,
+    ) -> None:
+        def format_metrics(info: dict[str, Any], log_config: dict[str, Any]) -> dict[str, Any]:
+            to_log = {
+                "episode_return": info["returned_episode_returns"],
+                "episode_length": info["returned_episode_lengths"],
+            }
+
+            sum_achievements = 0
+            for key, value in info.items():
+                if "achievements" in key.lower():
+                    to_log[key] = value
+                    sum_achievements += value / 100.0
+
+            to_log["achievements"] = sum_achievements
+            to_log["loss"] = info["loss"]
+            to_log["policy_loss"] = info["policy_loss"]
+            to_log["value_loss"] = info["value_loss"]
+            to_log["entropy_loss"] = info["entropy_loss"]
+
+            if log_config.get("intrinsic", False) and log_config["intrinsic"].get("ICM", False):
+                to_log["reward_extrinsic"] = info["reward_extrinsic"]
+                to_log["reward_intrinsic"] = info["reward_intrinsic"]
+                to_log["icm_reward"] = info["icm_reward"]
+                to_log["icm_inverse_loss"] = info["icm_inverse_loss"]
+                to_log["icm_forward_loss"] = info["icm_forward_loss"]
+
+            return to_log
+
+        def aggregate_and_log(  # noqa: C901
+            update_step: int,
+            log: dict[str, Any],
+            log_config: dict[str, Any],
+        ) -> None:
+            def aggregate_batch_logs(update_step: int, log_config: dict[str, Any]) -> dict[str, Any]:
+                agg_logs = {}
+                for key in batch_logs[update_step][0]:
+                    agg = []
+                    for i in range(log_config["NUM_REPEATS"]):
+                        val = batch_logs[update_step][i][key]
+                        if not jnp.isnan(val):
+                            agg.append(val)
+
+                    if len(agg) > 0:
+                        if key in ["episode_length", "episode_return"]:
+                            agg_logs[key] = np.mean(agg)
+                        else:
+                            agg_logs[key] = np.array(agg)
+
+                return agg_logs
+
+            def add_sps(agg_logs: dict[str, Any], log_config: dict[str, Any]) -> None:
+                if not log_config["DEBUG"]:
+                    return
+
+                if len(log_times) == 1:
+                    print("Started logging")
+                elif len(log_times) > 1:
+                    dt = log_times[-1] - log_times[-2]
+                    steps_between_updates = log_config["NUM_STEPS"] * log_config["NUM_ENVS"] * log_config["NUM_REPEATS"]
+                    agg_logs["sps"] = steps_between_updates / dt
+
+            update_step = int(update_step)
+            if update_step not in batch_logs:
+                batch_logs[update_step] = []
+
+            batch_logs[update_step].append(log)
+
+            if len(batch_logs[update_step]) != log_config["NUM_REPEATS"]:
+                return
+
+            agg_logs = aggregate_batch_logs(update_step, log_config)
+            log_times.append(time.time())
+            add_sps(agg_logs, log_config)
+
+            if wandb.run:
+                wandb.log(agg_logs)
+
+        log_config = config.copy()
+        log_config["NUM_REPEATS"] = config["n_runs"]
+        log_config["DEBUG"] = True
+        log_config["NUM_STEPS"] = config["training"]["n_batch_steps"]
+        log_config["NUM_ENVS"] = config["n_envs"]
+
+        to_log = format_metrics(metric_info, log_config)
+        aggregate_and_log(batch_idx, to_log, log_config)
+
+    jax.debug.callback(
+        metrics_callback,
+        metric_info,
+        batch_idx,
+    )
+
+
+def do_checkpoint(
+    model: nnx.Module,
+    batch_idx: jax.Array,
+    logging_threads: list[threading.Thread],
+) -> None:
+    def save_checkpoint(batch_idx: int, model_state: nnx.State) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                checkpoint_path = Path(temp_dir) / f"checkpoint_{batch_idx}"
+                checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                checkpointer.save(checkpoint_path, model_state)
+
+                artifact = wandb.Artifact(
+                    name=f"model_checkpoint_{batch_idx}",
+                    type="model",
+                    description=f"Model checkpoint at batch {batch_idx}",
+                )
+                artifact.add_dir(str(checkpoint_path))
+                wandb.log_artifact(artifact)
+        except Exception as e:
+            print(f"Error saving checkpoint at batch {batch_idx}: {e}")
+
+    def checkpoint_callback(batch_idx: int, model_state: nnx.State) -> None:
+        checkpoint_thread = threading.Thread(
+            target=save_checkpoint,
+            args=(batch_idx, model_state),
+            daemon=False,
+        )
+        logging_threads.append(checkpoint_thread)
+        checkpoint_thread.start()
+
+    _, model_state = nnx.split(model)
+    jax.debug.callback(
+        checkpoint_callback,
+        batch_idx,
+        model_state,
+    )
+
+
+def do_snapshot(
+    run_state: RunState,
+    batch_idx: jax.Array,
+    logging_threads: list[threading.Thread],
+) -> None:
+    def save_snapshot(batch_idx: int, snapshot: dict[str, Any]) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                snapshot_path = Path(temp_dir) / f"snapshot_{batch_idx}"
+                checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+                checkpointer.save(snapshot_path, snapshot)
+
+                artifact = wandb.Artifact(
+                    name=f"full_snapshot_{batch_idx}",
+                    type="snapshot",
+                    description=f"Complete training snapshot at batch {batch_idx}",
+                )
+                artifact.add_dir(str(snapshot_path))
+                wandb.log_artifact(artifact)
+        except Exception as e:
+            print(f"Error saving snapshot at batch {batch_idx}: {e}")
+
+    def snapshot_callback(batch_idx: int, snapshot: dict[str, Any]) -> None:
+        snapshot_thread = threading.Thread(
+            target=save_snapshot,
+            args=(batch_idx, snapshot),
+            daemon=False,
+        )
+        logging_threads.append(snapshot_thread)
+        snapshot_thread.start()
+
+    _, model_state = nnx.split(run_state.model)
+    optim_state = nnx.state(run_state.optim)
+    snapshot = {
+        "obs": run_state.obs,
+        "model_state": model_state,
+        "optim_state": optim_state,
+        "env_state": run_state.env_state,
+        "batch_idx": batch_idx,
+        "run_key": run_state.key,
+    }
+    jax.debug.callback(
+        snapshot_callback,
+        batch_idx,
+        snapshot,
+    )
 
 
 if __name__ == "__main__":
