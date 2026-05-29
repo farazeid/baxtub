@@ -290,7 +290,6 @@ def batch_step(
     run_state = run_state.replace(
         model=update_state.model,
         optim=update_state.optim,
-        batch_idx=run_state.batch_idx + 1,
         key=update_state.key,
     )
 
@@ -442,6 +441,10 @@ def batch_step(
     )
 
     # endregion
+
+    run_state = run_state.replace(
+        batch_idx=run_state.batch_idx + 1,
+    )
 
     return run_state, _
 
