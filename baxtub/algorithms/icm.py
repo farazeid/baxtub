@@ -111,13 +111,14 @@ def icm_step(
     icm_reward *= config["intrinsic"]["ICM"]["reward_coef"]
 
     extra = transition.extra
-    reward = transition.reward
+    reward = transition.reward + icm_reward
     extra["reward_extrinsic"] = transition.extra.get("reward_extrinsic", transition.reward)  # fmt: skip
     extra["reward_intrinsic"] = transition.extra.get("reward_intrinsic", jnp.zeros_like(icm_reward)) + icm_reward  # fmt: skip
     extra["icm_reward"] = icm_reward
-    reward += icm_reward
 
-    return transition.replace(reward=reward, extra=extra)
+    transition = transition.replace(reward=reward, extra=extra)
+
+    return transition
 
 
 def icm_batch_step(
@@ -166,8 +167,8 @@ def icm_epoch_update(
         lambda x: jnp.take(x, permutation, axis=0),
         flat_batch,
     )
-    minibatches = jax.tree.map(  # shape: (config["training"]["n_minibatches"], minibatch_size, ...)
-        lambda x: jnp.reshape(x, [config["training"]["n_minibatches"], -1] + list(x.shape[1:])),
+    minibatches = jax.tree.map(  # shape: (n_minibatches, minibatch_size, ...)
+        lambda x: jnp.reshape(x, [config["intrinsic"]["ICM"]["n_minibatches"], -1] + list(x.shape[1:])),
         shuffled_joint,
     )
 
